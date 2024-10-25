@@ -50,6 +50,30 @@ pub enum KakarotSerdeError {
         /// The name of the missing field.
         field: String,
     },
+
+    /// Error variant indicating that an unknown Cairo type was encountered during serialization.
+    #[error("Unknown Cairo type: {cairo_type}")]
+    UnknownCairoType {
+        /// The unknown Cairo type that was encountered.
+        cairo_type: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum CairoType {
+    Felt,
+    Int,
+    Bool,
+    Uint256,
+    Struct(String),
+    Pointer { pointee_type: Box<CairoType>, pointee_scope: Option<String> },
+    Array(Box<CairoType>, usize),
+}
+
+pub enum SerializedData {
+    Single(MaybeRelocatable),
+    List(Vec<SerializedData>),
+    Tuple(Vec<SerializedData>),
 }
 
 /// A structure representing the Kakarot serialization and deserialization context for Cairo
@@ -191,6 +215,88 @@ impl KakarotSerde {
 
         // Creates a `U256` value from the concatenated big-endian byte array.
         Ok(U256::from_be_slice(&bytes))
+    }
+
+    pub fn serialize_list(
+        &self,
+        segment_ptr: MaybeRelocatable,
+        item_scope: Option<String>,
+        list_length: Option<usize>,
+    ) -> Result<Option<Vec<SerializedData>>, KakarotSerdeError> {
+        let item_identifier = if let Some(s) = item_scope {
+            Some(self.get_identifier(&s, Some("struct".to_string()))?)
+        } else {
+            None
+        };
+
+        let item_type =
+            if let Some(id) = item_identifier { id.full_name } else { Some("felt".to_string()) };
+
+        // let item_size =  if let Some(id) = item_identifier {id.}
+
+        Ok(None)
+    }
+
+    pub fn serialize_inner(
+        &self,
+        cairo_type: &CairoType,
+        ptr: Relocatable,
+        length: usize,
+    ) -> Result<Option<Vec<SerializedData>>, KakarotSerdeError> {
+        match cairo_type {
+            CairoType::Pointer { pointee_type, pointee_scope } => {
+                // A pointer can reference a single struct or a list of structs, so we treat every
+                // pointer as a list of structs with length 1 or more.
+                let pointee = if let Some(p) = self.runner.vm.get_maybe(&ptr) {
+                    p
+                } else {
+                    return Ok(None);
+                };
+
+                // Edge case: If the pointer is 0, return None (null pointer).
+                if pointee == MaybeRelocatable::Int(Felt252::ZERO) {
+                    return Ok(None);
+                }
+
+                // If it's a pointer to `Felt`, serialize the list of felts.
+                if matches!(**pointee_type, CairoType::Felt) {
+                    return self.serialize_list(pointee, None, None);
+                }
+
+                // Otherwise, serialize a list of the pointee type, treating the pointee as the
+                // start of a list.
+                if let Some(serialized) =
+                    self.serialize_list(pointee, pointee_scope.clone(), Some(length))?
+                {
+                    return Ok(Some(serialized));
+                }
+
+                Ok(None)
+            }
+            // CairoType::Tuple(members) => {
+            //     // For Cairo tuples, serialize each member in order.
+            //     let serialized_members: Vec<SerializedData> = members
+            //         .iter()
+            //         .enumerate()
+            //         .map(|(i, member)| {
+            //             self._serialize(&member.typ, ptr + i as u64, 1).unwrap().unwrap()
+            //         })
+            //         .collect();
+            //     Ok(Some(SerializedData::Tuple(serialized_members)))
+            // }
+            // CairoType::Felt => {
+            //     // For Cairo `Felt`, just retrieve the single value from memory.
+            //     let value = self.runner.vm.get_maybe(&ptr)?;
+            //     Ok(Some(SerializedData::Single(value)))
+            // }
+            // CairoType::Struct(struct_name) => {
+            //     // For Cairo structs, serialize the struct's members.
+            //     self.serialize_scope(struct_name, ptr).map(Some)
+            // }
+            _ => {
+                Err(KakarotSerdeError::UnknownCairoType { cairo_type: format!("{:?}", cairo_type) })
+            }
+        }
     }
 }
 
